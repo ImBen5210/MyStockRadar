@@ -1,151 +1,195 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-import datetime as dt
+import yfinance as yf
+import requests
+from io import StringIO
+from datetime import datetime
 import warnings
 
-# 忽略警告
 warnings.filterwarnings('ignore')
 
-# ==========================================
-# 網頁介面設定
-# ==========================================
-st.set_page_config(page_title="AI 動能妖股雷達", layout="wide")
-st.title("🚀 終極版 AI 動能妖股雷達 (台/美雙引擎)")
-st.markdown("用量化數據捕捉資金動能，嚴守 5MA 防守紀律。")
+# 網頁基本設定
+st.set_page_config(page_title="AI 動能妖股雷達", page_icon="🚀", layout="wide")
 
 # ==========================================
-# 側邊欄設定 (市場切換與動態輸入)
+# 核心功能模組
 # ==========================================
-st.sidebar.header("⚙️ 參數設定")
-
-# 新增：市場切換開關
-market = st.sidebar.radio("🌍 選擇掃描市場：", ["台股 (TW)", "美股 (US)"])
-
-# 根據選擇的市場，載入不同的預設股票與成交量名稱
-if market == "台股 (TW)":
-    default_tickers = "2330.TW, 2303.TW, 2317.TW, 3231.TW, 2382.TW, 3037.TW, 2351.TW, 8054.TWO, 6285.TW, 3017.TW, 3008.TW, 3443.TW, 3583.TW, 3661.TW, 2363.TW"
-    vol_unit_name = "5日均量(張)"
-else:
-    # 美股熱門科技與動能股範例
-    default_tickers = "NVDA, TSLA, AAPL, MSFT, AMD, META, AMZN, GOOGL, SMCI, ARM, PLTR, COIN, SOFI, PLUG, RIOT"
-    vol_unit_name = "5日均量(百萬股)"
-
-ticker_input = st.sidebar.text_area("請輸入要掃描的股票代號 (用逗號分隔)：", value=default_tickers, height=150)
-
-# 解析輸入的股票代號
-ticker_list = [t.strip() for t in ticker_input.split(',') if t.strip()]
-
-# 設定資料抓取區間
-end_date = dt.datetime.today()
-start_date = end_date - dt.timedelta(days=60)
-
-# ==========================================
-# 核心運算函數
-# ==========================================
-@st.cache_data(ttl=3600) # 加上快取機制
-def calculate_momentum_score(ticker, market_type):
+@st.cache_data(ttl=3600)
+def get_tw_stock_list():
+    stock_dict = {}
     try:
-        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-        if df.empty or len(df) < 20:
-            return None
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-            
-        current_close = float(df['Close'].iloc[-1])
-        
-        # 新增：依據市場別，處理成交量單位差異
-        if market_type == "台股 (TW)":
-            current_vol = float(df['Volume'].iloc[-1]) / 1000
-            df['Vol_5MA'] = df['Volume'].rolling(window=5).mean() / 1000
-        else:
-            # 美股換算成「百萬股 (Millions)」方便閱讀
-            current_vol = float(df['Volume'].iloc[-1]) / 1000000
-            df['Vol_5MA'] = df['Volume'].rolling(window=5).mean() / 1000000
-            
-        vol_5ma = float(df['Vol_5MA'].iloc[-1])
-        
-        # 基礎濾網：台股<1000張剔除，美股<100萬股(1.0)剔除
-        if (market_type == "台股 (TW)" and vol_5ma < 1000) or (market_type == "美股 (US)" and vol_5ma < 1.0):
-            return None
-            
-        df['MA5'] = df['Close'].rolling(window=5).mean()
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        ma5 = float(df['MA5'].iloc[-1])
-        ma20 = float(df['MA20'].iloc[-1])
-        
-        df['STD20'] = df['Close'].rolling(window=20).std()
-        df['BB_Upper'] = df['MA20'] + (2 * df['STD20'])
-        df['BB_Lower'] = df['MA20'] - (2 * df['STD20'])
-        df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['MA20']
-        
-        df['Return'] = df['Close'].pct_change()
-        volatility = float(df['Return'].rolling(window=10).std().iloc[-1]) * np.sqrt(252)
-        
-        ma5_bias = ((current_close - ma5) / ma5) * 100
-        
-        base_score = 0
-        if current_close > ma5: base_score += 20
-        if ma5 > ma20: base_score += 15
-        if current_close > float(df['BB_Upper'].iloc[-2]): base_score += 25
-        if volatility > 0.3: base_score += 20
-        if current_vol > vol_5ma * 1.5: base_score += 20
-        
-        bias_penalty = 0
-        if ma5_bias > 5:
-            bias_penalty = (ma5_bias - 5) * -5 
-            
-        final_score = base_score + bias_penalty
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        for m in [2, 4]:
+            url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={m}"
+            res = requests.get(url, headers=headers, verify=False, timeout=15)
+            df = pd.read_html(StringIO(res.text))[0].iloc[1:]
+            for _, row in df.iterrows():
+                try:
+                    code_name = str(row[0]).split()
+                    if len(code_name) == 2:
+                        code, name = code_name
+                        cat = str(row[4])
+                        if len(code) == 4:
+                            suffix = ".TW" if m == 2 else ".TWO"
+                            stock_dict[f"{code}{suffix}"] = {"name": name, "sector": cat}
+                except: continue
+    except: pass
+    return stock_dict
 
-        # 美股不需要去除 .TW 後綴，台股才需要
-        ticker_name = ticker.replace('.TW', '').replace('.TWO', '') if market_type == "台股 (TW)" else ticker
+@st.cache_data(ttl=86400)
+def get_sp500_tickers():
+    try:
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0'}
+        res = requests.get(url, headers=headers, timeout=15)
+        df = pd.read_html(StringIO(res.text))[0]
+        tickers = df['Symbol'].str.replace('.', '-').tolist()
+        names = df['Security'].tolist()
+        sectors = df['GICS Sector'].tolist()
+        return {t: {"name": n, "sector": s} for t, n, s in zip(tickers, names, sectors)}
+    except: return {}
 
-        return {
-            '股票代號': ticker_name,
-            '收盤價': round(current_close, 2),
-            'MA5(防守線)': round(ma5, 2),
-            '5MA乖離率(%)': round(ma5_bias, 2),
-            '調整後AI總分': round(final_score, 1),
-            '基礎AI分': round(base_score, 1),
-            '乖離懲罰分': round(bias_penalty, 1),
-            # 美股顯示到小數點第一位(例如 5.2 百萬股)，台股顯示整數(例如 1500 張)
-            vol_unit_name: round(vol_5ma, 1) if market_type == "美股 (US)" else int(vol_5ma)
-        }
-    except Exception as e:
-        return None
+def check_market(symbol, ma_days=20):
+    try:
+        data = yf.download(symbol, period="50d", progress=False)
+        close = float(data['Close'].iloc[-1].iloc[0]) if isinstance(data['Close'].iloc[-1], pd.Series) else float(data['Close'].iloc[-1])
+        ma20 = float(data['Close'].rolling(ma_days).mean().iloc[-1].iloc[0]) if isinstance(data['Close'].rolling(ma_days).mean().iloc[-1], pd.Series) else float(data['Close'].rolling(ma_days).mean().iloc[-1])
+        return close >= ma20, close, ma20
+    except:
+        return True, 0, 0
 
 # ==========================================
-# 執行按鈕與畫面呈現
+# 網頁介面設計
 # ==========================================
-if st.sidebar.button("啟動掃描 🎯"):
-    with st.spinner(f"正在連線抓取【{market}】最新資料，請稍候..."):
-        results = []
-        progress_bar = st.progress(0)
-        for i, ticker in enumerate(ticker_list):
-            res = calculate_momentum_score(ticker, market)
-            if res:
-                results.append(res)
-            progress_bar.progress((i + 1) / len(ticker_list))
-            
-        if results:
-            df_results = pd.DataFrame(results)
-            df_results = df_results.sort_values(by='調整後AI總分', ascending=False).reset_index(drop=True)
-            
-            st.success(f"🎯 掃描完成！今日 {market} Top 20 狙擊榜單：")
-            
-            st.dataframe(
-                df_results.head(20),
-                use_container_width=True,
-                height=600
-            )
-            
-            st.info("""
-            **實戰教練小提醒：**
-            * 🟢 **乖離率 0% ~ 3%**：完美獵物，防守風險極低。
-            * 🟡 **乖離率 3% ~ 5%**：注意追高風險，建議等回檔再試單。
-            * 🔴 **乖離率 > 5%**：容易雙巴，不建議買進，除非隔天回測 5MA 有撐。
-            """)
-        else:
-            st.warning("今日沒有符合條件的股票，或是資料抓取出現異常。")
+st.title("🚀 AI 動能妖股雷達 (終極網頁版)")
+st.markdown("自動掃描全市場，尋找符合【強勢動能】與【布林突破】的頂尖標的。")
+
+# 側邊欄控制面板
+st.sidebar.header("⚙️ 雷達設定")
+market = st.sidebar.radio("選擇掃描市場", ["🇹🇼 台股 (上市/上櫃)", "🇺🇸 美股 (S&P 500)"])
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **實戰紀律提醒**\n\n進場後若收盤跌破 5MA (五日線)，請無條件執行停損。")
+
+if st.button("開始全面掃描", type="primary"):
+    # 1. 大盤環境判斷
+    status_placeholder = st.empty()
+    status_placeholder.info("🌍 正在偵測大盤多空環境...")
+    
+    if "台股" in market:
+        is_bull, idx_close, idx_ma = check_market("^TWII")
+        stock_dict = get_tw_stock_list()
+        vol_limit = 1000 # 台股千張
+        vol_label = "5日均量(張)"
+    else:
+        is_bull, idx_close, idx_ma = check_market("^GSPC")
+        stock_dict = get_sp500_tickers()
+        vol_limit = 1000000 # 美股百萬股
+        vol_label = "5日均量(M)"
+
+    if is_bull:
+        st.success(f"🟢 【大盤偏多】目前指數 ({idx_close:.2f}) 站上月線 ({idx_ma:.2f})，適合動能策略！")
+    else:
+        st.error(f"🔴 【大盤偏空】目前指數 ({idx_close:.2f}) 跌破月線 ({idx_ma:.2f})，極易假突破，建議空手觀望！")
+
+    if not stock_dict:
+        st.error("❌ 無法取得股票清單，請稍後再試。")
+        st.stop()
+
+    # 2. 開始掃描運算
+    all_tickers = list(stock_dict.keys())
+    progress_bar = st.progress(0)
+    
+    batch_size = 50
+    records = []
+    
+    for i in range(0, len(all_tickers), batch_size):
+        batch = all_tickers[i:i+batch_size]
+        status_placeholder.info(f"⛏️ 正在下載歷史數據與計算特徵... 進度: {min(i+batch_size, len(all_tickers))}/{len(all_tickers)}")
+        progress_bar.progress(min(i+batch_size, len(all_tickers)) / len(all_tickers))
+        
+        try:
+            data = yf.download(batch, period="100d", interval="1d", group_by='ticker', auto_adjust=False, progress=False, threads=True)
+            for ticker in batch:
+                try:
+                    df = data[ticker] if len(batch) > 1 else data
+                    if df.empty or len(df) < 65: continue
+                    df = df.dropna()
+                    
+                    close = df['Close']
+                    vol = df['Volume']
+                    
+                    # 成交量濾網
+                    if "台股" in market:
+                        avg_vol = float((vol.tail(5).mean()) / 1000)
+                    else:
+                        avg_vol = float(vol.tail(5).mean())
+                        
+                    if avg_vol < vol_limit: continue
+                    
+                    # 計算均線與特徵
+                    ma5 = float(close.rolling(5).mean().iloc[-1])
+                    ma20 = float(close.rolling(20).mean().iloc[-1])
+                    ma60 = float(close.rolling(60).mean().iloc[-1])
+                    current_close = float(close.iloc[-1])
+                    
+                    # 必須站在 5MA 之上
+                    if current_close < ma5: continue
+                    
+                    daily_ret = close.pct_change()
+                    hist_vol = float(daily_ret.rolling(20).std().iloc[-1] * np.sqrt(252) * 100)
+                    std20 = close.rolling(20).std().iloc[-1]
+                    bb_upper = float(ma20 + 2 * std20)
+                    bb_width = float((bb_upper - (ma20 - 2 * float(std20))) / ma20 * 100)
+                    
+                    p_to_ma60 = (current_close / ma60 - 1) * 100
+                    trend_str = (ma5 / ma60 - 1) * 100
+                    p_to_ma20 = (current_close / ma20 - 1) * 100
+                    p_to_bbupper = (current_close / bb_upper - 1) * 100
+                    roc_10 = float((current_close - close.iloc[-11]) / close.iloc[-11] * 100)
+                    
+                    if np.isnan(hist_vol) or np.isnan(roc_10): continue
+
+                    records.append({
+                        'ID': ticker.replace(".TW", "").replace(".TWO", ""),
+                        '股名': stock_dict[ticker]['name'],
+                        '板塊產業': stock_dict[ticker]['sector'],
+                        '收盤價': round(current_close, 2),
+                        'MA5 (防守線)': round(ma5, 2),
+                        vol_label: round(avg_vol / 1000000, 2) if "美股" in market else int(avg_vol),
+                        'F_Hist_Vol': hist_vol, 'F_BB_Width': bb_width, 'F_P_to_MA60': p_to_ma60,
+                        'F_Trend_Strength': trend_str, 'F_P_to_MA20': p_to_ma20, 'F_P_to_BBUpper': p_to_bbupper, 'F_ROC_10': roc_10
+                    })
+                except: continue
+        except: pass
+
+    # 3. AI 排名運算
+    status_placeholder.success("✅ 數據下載完成！正在執行 AI 權重運算...")
+    progress_bar.empty()
+    
+    df_res = pd.DataFrame(records)
+    if not df_res.empty:
+        features = ['F_Hist_Vol', 'F_BB_Width', 'F_P_to_MA60', 'F_Trend_Strength', 'F_P_to_MA20', 'F_P_to_BBUpper', 'F_ROC_10']
+        weights = [29.08, 19.33, 10.39, 7.67, 7.26, 5.09, 4.25]
+
+        for f in features: df_res[f + '_Rank'] = df_res[f].rank(pct=True)
+        df_res['AI 總分'] = 0.0
+        for f, w in zip(features, weights): df_res['AI 總分'] += df_res[f + '_Rank'] * w
+        
+        df_res['AI 總分'] = df_res['AI 總分'].round(2)
+        top20 = df_res.sort_values(by='AI 總分', ascending=False).head(20)
+        
+        # 顯示結果表格 (隱藏中間計算過程)
+        display_cols = ['ID', '股名', '板塊產業', '收盤價', 'MA5 (防守線)', vol_label, 'AI 總分']
+        st.dataframe(top20[display_cols], use_container_width=True, hide_index=True)
+        
+        # 供下載的 CSV 包含所有特徵
+        csv = top20.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button(
+            label="📥 下載完整 CSV 報表",
+            data=csv,
+            file_name=f"Radar_Top20_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+    else:
+        st.warning("目前沒有符合條件的標的。")
