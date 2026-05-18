@@ -76,9 +76,9 @@ def fetch_and_calculate_features(market_name):
     if not stock_dict:
         return pd.DataFrame(), vol_label
 
-    # 📊 升級 A：獲取大盤資訊，作為相對強度 (RS) 的比較基準
+    # 📊 升級 A (已修復)：獲取大盤資訊，期間改為 1y 確保資料量充足
     try:
-        mkt_data = yf.download(market_ticker, period="6mo", auto_adjust=True, progress=False)['Close']
+        mkt_data = yf.download(market_ticker, period="1y", auto_adjust=True, progress=False)['Close']
         # 計算大盤過去 20 天的報酬率
         mkt_ret_20 = float((mkt_data.iloc[-1] / mkt_data.iloc[-21]) - 1) * 100
     except:
@@ -91,13 +91,13 @@ def fetch_and_calculate_features(market_name):
     for i in range(0, len(all_tickers), batch_size):
         batch = all_tickers[i:i+batch_size]
         try:
-            # 📊 升級 B：為了算 120日新高，抓取期間延長至 6mo (約 126 個交易日)
-            data = yf.download(batch, period="6mo", interval="1d", group_by='ticker', auto_adjust=True, progress=False, threads=True)
+            # 📊 升級 B (已修復)：抓取期間延長至 1y，確保能算出 120日高點
+            data = yf.download(batch, period="1y", interval="1d", group_by='ticker', auto_adjust=True, progress=False, threads=True)
             for ticker in batch:
                 try:
                     df = data[ticker] if len(batch) > 1 else data
-                    # 必須有足夠天數才能算 120日高點
-                    if df.empty or len(df) < 125: continue 
+                    # 🛡️ 教練修復：濾網放寬為 120 天
+                    if df.empty or len(df) < 120: continue 
                     df = df.dropna()
                     
                     close = df['Close']
