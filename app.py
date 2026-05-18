@@ -136,17 +136,20 @@ if st.button("開始全面掃描", type="primary"):
                     # 必須站在 5MA 之上
                     if current_close < ma5: continue
                     
+                    # ✨ 新增：計算 5MA 乖離率 (加極小值防分母為0)
+                    ma5_bias = ((current_close - ma5) / (ma5 + 1e-9)) * 100
+                    
                     daily_ret = close.pct_change()
                     hist_vol = float(daily_ret.rolling(20).std().iloc[-1] * np.sqrt(252) * 100)
                     std20 = close.rolling(20).std().iloc[-1]
                     bb_upper = float(ma20 + 2 * std20)
-                    bb_width = float((bb_upper - (ma20 - 2 * float(std20))) / ma20 * 100)
+                    bb_width = float((bb_upper - (ma20 - 2 * float(std20))) / (ma20 + 1e-9) * 100)
                     
-                    p_to_ma60 = (current_close / ma60 - 1) * 100
-                    trend_str = (ma5 / ma60 - 1) * 100
-                    p_to_ma20 = (current_close / ma20 - 1) * 100
-                    p_to_bbupper = (current_close / bb_upper - 1) * 100
-                    roc_10 = float((current_close - close.iloc[-11]) / close.iloc[-11] * 100)
+                    p_to_ma60 = (current_close / (ma60 + 1e-9) - 1) * 100
+                    trend_str = (ma5 / (ma60 + 1e-9) - 1) * 100
+                    p_to_ma20 = (current_close / (ma20 + 1e-9) - 1) * 100
+                    p_to_bbupper = (current_close / (bb_upper + 1e-9) - 1) * 100
+                    roc_10 = float((current_close - close.iloc[-11]) / (close.iloc[-11] + 1e-9) * 100)
                     
                     if np.isnan(hist_vol) or np.isnan(roc_10): continue
 
@@ -156,6 +159,7 @@ if st.button("開始全面掃描", type="primary"):
                         '板塊產業': stock_dict[ticker]['sector'],
                         '收盤價': round(current_close, 2),
                         'MA5 (防守線)': round(ma5, 2),
+                        '5MA乖離率(%)': round(ma5_bias, 2), # ✨ 新增乖離率欄位
                         vol_label: round(avg_vol / 1000000, 2) if "美股" in market else int(avg_vol),
                         'F_Hist_Vol': hist_vol, 'F_BB_Width': bb_width, 'F_P_to_MA60': p_to_ma60,
                         'F_Trend_Strength': trend_str, 'F_P_to_MA20': p_to_ma20, 'F_P_to_BBUpper': p_to_bbupper, 'F_ROC_10': roc_10
@@ -173,15 +177,24 @@ if st.button("開始全面掃描", type="primary"):
         weights = [29.08, 19.33, 10.39, 7.67, 7.26, 5.09, 4.25]
 
         for f in features: df_res[f + '_Rank'] = df_res[f].rank(pct=True)
+        
         df_res['AI 總分'] = 0.0
         for f, w in zip(features, weights): df_res['AI 總分'] += df_res[f + '_Rank'] * w
+        
+        # ✨ 新增：動態扣分機制 (乖離率>5%，每多1%扣5分)
+        df_res['乖離懲罰分'] = df_res['5MA乖離率(%)'].apply(lambda x: (x - 5) * -5 if x > 5 else 0)
+        df_res['AI 總分'] = df_res['AI 總分'] + df_res['乖離懲罰分']
         
         df_res['AI 總分'] = df_res['AI 總分'].round(2)
         top20 = df_res.sort_values(by='AI 總分', ascending=False).head(20)
         
         # 顯示結果表格 (隱藏中間計算過程)
-        display_cols = ['ID', '股名', '板塊產業', '收盤價', 'MA5 (防守線)', vol_label, 'AI 總分']
+        # ✨ 新增：將乖離率加入顯示清單
+        display_cols = ['ID', '股名', '板塊產業', '收盤價', 'MA5 (防守線)', '5MA乖離率(%)', vol_label, 'AI 總分']
         st.dataframe(top20[display_cols], use_container_width=True, hide_index=True)
+        
+        # ✨ 新增：實戰對照指南提示框
+        st.info("💡 **乖離率實戰指南**：🟢 0~3% 首選試單 ｜ 🟡 3~5% 注意追高 ｜ 🔴 >5% 已自動扣除 AI 總分，嚴防高檔洗盤。")
         
         # 供下載的 CSV 包含所有特徵
         csv = top20.to_csv(index=False, encoding='utf-8-sig')
